@@ -46,21 +46,9 @@ internal sealed class DeckStore
             Validate(Read());
             return;
         }
-        Save(new DeckLayout {
-            columns = 3, rows = 2, buttons = new List<DeckButton> {
-                Button("재생 / 일시정지", "⏯", "#365CE8", "play"),
-                Button("이전 곡", "⏮", "#39455D", "previous"),
-                Button("다음 곡", "⏭", "#39455D", "next"),
-                Button("볼륨 내리기", "−", "#275D59", "volumeDown"),
-                Button("볼륨 올리기", "+", "#275D59", "volumeUp"),
-                Button("음소거", "♪", "#744669", "mute")
-            }
-        });
-    }
-
-    public static DeckButton Button(string label, string icon, string color, string action)
-    {
-        return new DeckButton { label = label, icon = icon, color = color, action = action, target = "" };
+        var buttons = new List<DeckButton>();
+        for (int i = 1; i <= 6; i++) buttons.Add(DeckActions.DefaultButton(i));
+        Save(new DeckLayout { columns = 3, rows = 2, buttons = buttons });
     }
 
     public DeckLayout Read()
@@ -98,6 +86,10 @@ internal static class DeckActions
     public static readonly string[] Ids = {
         "none", "play", "previous", "next", "volumeDown", "volumeUp", "mute", "open", "shortcut"
     };
+    private static readonly string[] Icons = { "", "⏯", "⏮", "⏭", "−", "+", "♪", "↗", "⌨" };
+    private static readonly string[] Colors = {
+        "#39455D", "#365CE8", "#39455D", "#39455D", "#275D59", "#275D59", "#744669", "#28547D", "#684997"
+    };
     private static readonly Keys[] Media = {
         Keys.MediaPlayPause, Keys.MediaPreviousTrack, Keys.MediaNextTrack,
         Keys.VolumeDown, Keys.VolumeUp, Keys.VolumeMute
@@ -105,6 +97,14 @@ internal static class DeckActions
 
     [DllImport("user32.dll")]
     private static extern void keybd_event(byte virtualKey, byte scan, uint flags, UIntPtr extra);
+
+    public static DeckButton DefaultButton(int action)
+    {
+        return new DeckButton {
+            label = action == 0 ? "" : Names[action], icon = Icons[action],
+            color = Colors[action], action = Ids[action], target = ""
+        };
+    }
 
     public static void Run(DeckButton button)
     {
@@ -183,6 +183,59 @@ internal static class DeckActions
     }
 }
 
+internal sealed class DevicePairing
+{
+    private const string Alphabet = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
+    private readonly string path;
+    public readonly string Code;
+    public bool Completed { get; private set; }
+
+    public DevicePairing(string path, bool previouslyLaunched)
+    {
+        this.path = path;
+        bool exists = File.Exists(path);
+        if (exists)
+        {
+            string[] lines = File.ReadAllLines(path, Encoding.UTF8);
+            bool completed;
+            if (lines.Length == 2 && ValidCode(lines[0]) && Boolean.TryParse(lines[1], out completed))
+            {
+                Code = lines[0];
+                Completed = completed;
+                return;
+            }
+        }
+        Code = CreateCode();
+        Save(!exists && previouslyLaunched);
+    }
+
+    private static bool ValidCode(string code)
+    {
+        if (code.Length != 8) return false;
+        foreach (char character in code)
+            if (Alphabet.IndexOf(character) < 0) return false;
+        return true;
+    }
+
+    public static string CreateCode()
+    {
+        byte[] random = new byte[8];
+        using (RandomNumberGenerator rng = RandomNumberGenerator.Create()) rng.GetBytes(random);
+        StringBuilder code = new StringBuilder();
+        foreach (byte value in random) code.Append(Alphabet[value & 31]);
+        return code.ToString();
+    }
+
+    public void Complete() { Save(true); }
+
+    private void Save(bool completed)
+    {
+        using (var contents = new MemoryStream(Encoding.UTF8.GetBytes(Code + "\n" + completed)))
+            InstallPaths.WriteAtomic(path, contents);
+        Completed = completed;
+    }
+}
+
 internal sealed class PhoneServer : IDisposable
 {
     public const int Port = 8765;
@@ -193,17 +246,14 @@ internal sealed class PhoneServer : IDisposable
     private readonly object actionLock = new object();
     public readonly string Code;
     public readonly int PortNumber;
+    private volatile bool remoteConnected;
+    public bool RemoteConnected { get { return remoteConnected; } }
 
-    public PhoneServer(DeckStore store, string web, int preferredPort = Port)
+    public PhoneServer(DeckStore store, string web, int preferredPort = Port, string code = null)
     {
         this.store = store;
         this.web = web;
-        byte[] random = new byte[8];
-        using (RandomNumberGenerator rng = RandomNumberGenerator.Create()) rng.GetBytes(random);
-        const string alphabet = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
-        StringBuilder code = new StringBuilder();
-        foreach (byte value in random) code.Append(alphabet[value & 31]);
-        Code = code.ToString();
+        Code = code ?? DevicePairing.CreateCode();
         listener = new TcpListener(IPAddress.Any, preferredPort);
         try { listener.Start(); }
         catch (SocketException error)
@@ -218,7 +268,7 @@ internal sealed class PhoneServer : IDisposable
 
     public void Dispose() { listener.Stop(); }
 
-    public static List<string> Addresses(int port)
+    public static List<string> Addresses(int port, bool includeLoopback)
     {
         List<string> result = new List<string>();
         foreach (NetworkInterface adapter in NetworkInterface.GetAllNetworkInterfaces())
@@ -239,7 +289,7 @@ internal sealed class PhoneServer : IDisposable
                 else result.Add(address);
             }
         }
-        result.Add(Url("127.0.0.1", port));
+        if (includeLoopback) result.Add(Url("127.0.0.1", port));
         return result;
     }
 
@@ -329,6 +379,7 @@ internal sealed class PhoneServer : IDisposable
             }
             Reply(stream, "200 OK", "application/json", new JavaScriptSerializer().Serialize(
                 new { version = deck.version, columns = deck.columns, rows = deck.rows, buttons = buttons }));
+            ObserveLayoutRequest(((IPEndPoint)client.Client.RemoteEndPoint).Address, local.Address);
             return;
         }
         const string press = "/api/press/";
@@ -365,6 +416,11 @@ internal sealed class PhoneServer : IDisposable
             }
         }
         Reply(stream, "404 Not Found", "text/plain", "Not found");
+    }
+
+    private void ObserveLayoutRequest(IPAddress client, IPAddress host)
+    {
+        if (!IPAddress.IsLoopback(client) && !client.Equals(host)) remoteConnected = true;
     }
 
     private void Asset(NetworkStream stream, string name, string type)
@@ -448,8 +504,101 @@ internal sealed class DragGhost : Form
     }
 }
 
+internal sealed class DeviceAddressPicker : ComboBox
+{
+    private readonly int port;
+    private readonly bool includeLoopback;
+
+    public DeviceAddressPicker(int port, bool includeLoopback)
+    {
+        this.port = port;
+        this.includeLoopback = includeLoopback;
+        DropDownStyle = ComboBoxStyle.DropDownList;
+        Width = 203;
+        RefreshAddresses();
+    }
+
+    public void RefreshAddresses()
+    {
+        string previous = Text;
+        Items.Clear();
+        foreach (string url in PhoneServer.Addresses(port, includeLoopback)) Items.Add(url);
+        if (Items.Count == 0) return;
+        int index = Items.IndexOf(previous);
+        SelectedIndex = index >= 0 ? index : 0;
+    }
+}
+
+internal sealed class PairingWindow : Form
+{
+    private readonly System.Windows.Forms.Timer timer = new System.Windows.Forms.Timer { Interval = 200 };
+
+    public PairingWindow(PhoneServer server)
+    {
+        Text = "Pocket Deck · 기기 연결";
+        ClientSize = new Size(530, 270);
+        StartPosition = FormStartPosition.CenterScreen;
+        FormBorderStyle = FormBorderStyle.FixedDialog;
+        MaximizeBox = false;
+        MinimizeBox = false;
+        Font = new Font("Malgun Gothic", 9F);
+        BackColor = Color.FromArgb(245, 247, 251);
+
+        var content = new TableLayoutPanel { Dock = DockStyle.Fill, Padding = new Padding(24),
+            ColumnCount = 1, RowCount = 6 };
+        content.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+        foreach (int height in new[] { 39, 46, 24, 39, 35, 30 })
+            content.RowStyles.Add(new RowStyle(SizeType.Absolute, height));
+        Controls.Add(content);
+
+        var heading = new Label { Text = "기기 연결", Font = new Font("Malgun Gothic", 17F, FontStyle.Bold),
+            AutoSize = true };
+        content.Controls.Add(heading, 0, 0);
+        content.Controls.Add(new Label {
+            Text = "PC와 기기를 같은 공유기에 연결하세요.\n기기 브라우저에서 주소를 열고 연결 코드를 입력하세요.",
+            AutoSize = true
+        }, 0, 1);
+        content.Controls.Add(new Label { Text = "접속 주소", AutoSize = true }, 0, 2);
+
+        var connection = new FlowLayoutPanel { Dock = DockStyle.Fill, WrapContents = false, Margin = Padding.Empty };
+        content.Controls.Add(connection, 0, 3);
+        var address = new DeviceAddressPicker(server.PortNumber, false) { Width = 235 };
+        var refresh = new Button { Text = "새로고침", AutoSize = true };
+        var copy = new Button { Text = "연결 링크 복사", AutoSize = true, Enabled = address.SelectedIndex >= 0 };
+        connection.Controls.AddRange(new Control[] { address, refresh, copy });
+        copy.Click += (s, e) => Clipboard.SetText(address.Text + "#" + server.Code);
+        content.Controls.Add(new Label { Text = "연결 코드  " + server.Code, AutoSize = true,
+            Font = new Font(Font, FontStyle.Bold) }, 0, 4);
+        var status = new Label { AutoSize = true, ForeColor = Color.FromArgb(57, 69, 93) };
+        content.Controls.Add(status, 0, 5);
+        Action showStatus = () => {
+            copy.Enabled = address.SelectedIndex >= 0;
+            status.Text = copy.Enabled
+                ? "연결을 기다리는 중 · 연결되면 버튼 설정이 열려요."
+                : "PC 네트워크를 확인한 뒤 주소를 새로고침하세요.";
+        };
+        address.SelectedIndexChanged += (s, e) => showStatus();
+        refresh.Click += (s, e) => { address.RefreshAddresses(); showStatus(); };
+        showStatus();
+
+        timer.Tick += (s, e) => {
+            if (!server.RemoteConnected) return;
+            timer.Stop();
+            DialogResult = DialogResult.OK;
+        };
+        Shown += (s, e) => timer.Start();
+    }
+
+    protected override void Dispose(bool disposing)
+    {
+        if (disposing) timer.Dispose();
+        base.Dispose(disposing);
+    }
+}
+
 internal sealed class DeckEditor : Form
 {
+    private const string ActionFormat = "PocketDeck.Action";
     private readonly DeckStore store;
     private readonly string connectionCode;
     private readonly int port;
@@ -460,12 +609,13 @@ internal sealed class DeckEditor : Form
     private readonly TextBox name = new TextBox();
     private readonly TextBox icon = new TextBox();
     private readonly TextBox target = new TextBox();
+    private readonly Label targetLabel = new Label();
     private readonly ComboBox action = new ComboBox();
     private readonly Button color = new Button();
     private readonly Button browse = new Button();
     private readonly Label status = new Label();
     private readonly Label selection = new Label();
-    private readonly ComboBox address = new ComboBox();
+    private readonly DeviceAddressPicker address;
     private readonly List<Button> tiles = new List<Button>();
     private readonly ToolStripMenuItem appMenu = new ToolStripMenuItem("Pocket Deck");
     private readonly ToolStripMenuItem updateMenu = new ToolStripMenuItem("업데이트 확인");
@@ -477,15 +627,16 @@ internal sealed class DeckEditor : Form
     private bool loading;
     private bool dirty;
 
-    public DeckEditor(DeckStore store, string connectionCode, int port)
+    public DeckEditor(DeckStore store, string connectionCode, int port, bool newlyConnected = false)
     {
         this.store = store;
         this.connectionCode = connectionCode;
         this.port = port;
+        address = new DeviceAddressPicker(port, true);
         draft = store.Read();
         Text = "Pocket Deck " + BuildInfo.Version;
-        ClientSize = new Size(930, 520);
-        MinimumSize = new Size(760, 545);
+        ClientSize = new Size(960, 600);
+        MinimumSize = new Size(765, 575);
         StartPosition = FormStartPosition.CenterScreen;
         Font = new Font("Malgun Gothic", 9F);
         AutoScaleMode = AutoScaleMode.Dpi;
@@ -494,7 +645,7 @@ internal sealed class DeckEditor : Form
         var root = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 2, RowCount = 3,
             Padding = new Padding(16) };
         root.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
-        root.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 245));
+        root.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 224));
         root.RowStyles.Add(new RowStyle(SizeType.Absolute, 49));
         root.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
         root.RowStyles.Add(new RowStyle(SizeType.Absolute, 46));
@@ -504,7 +655,7 @@ internal sealed class DeckEditor : Form
         appMenu.DropDownItems.Add(updateMenu);
         updateMenu.Click += async (s, e) => await CheckUpdates(true);
         appMenu.DropDownItems.Add("GitHub 업데이트 저장소…", null, (s, e) => ConfigureRepository());
-        appMenu.DropDownItems.Add("아이폰 디자인 폴더 열기", null, (s, e) => OpenDesignFolder());
+        appMenu.DropDownItems.Add("기기 화면 디자인 폴더 열기", null, (s, e) => OpenDesignFolder());
         if (!InstallPaths.IsInstalled)
         {
             updateMenu.Enabled = false;
@@ -517,12 +668,9 @@ internal sealed class DeckEditor : Form
         var connection = new FlowLayoutPanel { Dock = DockStyle.Fill, WrapContents = false };
         root.Controls.Add(connection, 0, 0);
         root.SetColumnSpan(connection, 2);
-        connection.Controls.Add(new Label { Text = "아이폰 주소", AutoSize = true, Margin = new Padding(0, 8, 8, 0) });
-        address.DropDownStyle = ComboBoxStyle.DropDownList;
-        address.Width = 203;
+        connection.Controls.Add(new Label { Text = "기기 연결", AutoSize = true, Margin = new Padding(0, 8, 8, 0) });
         connection.Controls.Add(address);
-        RefreshAddresses();
-        connection.Controls.Add(MakeButton("새로고침", (s, e) => RefreshAddresses()));
+        connection.Controls.Add(MakeButton("새로고침", (s, e) => address.RefreshAddresses()));
         connection.Controls.Add(new Label { Text = "코드  " + connectionCode, AutoSize = true,
             Margin = new Padding(12, 8, 8, 0) });
         connection.Controls.Add(MakeButton("링크 복사", (s, e) => Clipboard.SetText(PairUrl())));
@@ -531,17 +679,18 @@ internal sealed class DeckEditor : Form
                 UseShellExecute = true
             })));
 
-        var canvas = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 1, RowCount = 2,
+        var canvas = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 1, RowCount = 3,
             Margin = new Padding(0, 0, 16, 0) };
         canvas.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
         canvas.RowStyles.Add(new RowStyle(SizeType.Absolute, 41));
         canvas.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
+        canvas.RowStyles.Add(new RowStyle(SizeType.Absolute, 154));
         root.Controls.Add(canvas, 0, 1);
         var toolbar = new FlowLayoutPanel { Dock = DockStyle.Fill, WrapContents = false };
         canvas.Controls.Add(toolbar, 0, 0);
         AddSize(toolbar, "열", columns, draft.columns, 5);
         AddSize(toolbar, "행", rows, draft.rows, 4);
-        toolbar.Controls.Add(new Label { Text = "버튼을 끌어서 위치를 바꿔보세요.", AutoSize = true,
+        toolbar.Controls.Add(new Label { Text = "오른쪽 동작을 원하는 칸에 끌어놓으세요.", AutoSize = true,
             Margin = new Padding(12, 8, 0, 0) });
         preview.Dock = DockStyle.Fill;
         preview.Margin = Padding.Empty;
@@ -549,37 +698,42 @@ internal sealed class DeckEditor : Form
         preview.BackColor = Color.FromArgb(14, 19, 32);
         canvas.Controls.Add(preview, 0, 1);
 
-        var fields = new TableLayoutPanel { Dock = DockStyle.Fill, AutoScroll = true,
-            ColumnCount = 1, Margin = Padding.Empty };
-        fields.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
-        root.Controls.Add(fields, 1, 1);
+        var fields = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 3, RowCount = 5,
+            Margin = new Padding(0, 10, 0, 0) };
+        foreach (int width in new[] { 36, 42, 22 })
+            fields.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, width));
+        foreach (int height in new[] { 28, 22, 35, 22, 31 })
+            fields.RowStyles.Add(new RowStyle(SizeType.Absolute, height));
+        canvas.Controls.Add(fields, 0, 2);
         selection.Font = new Font(Font, FontStyle.Bold);
         selection.AutoSize = true;
         selection.Margin = new Padding(3, 4, 3, 3);
-        fields.Controls.Add(selection);
+        fields.Controls.Add(selection, 0, 0);
+        fields.SetColumnSpan(selection, 3);
         name.MaxLength = 32;
         icon.MaxLength = 8;
         target.MaxLength = 1024;
-        AddField(fields, "버튼 이름", name);
-        AddField(fields, "아이콘 · 문자 또는 이모지", icon);
+        AddField(fields, new Label { Text = "버튼 이름" }, name, 0, 1);
+        AddField(fields, new Label { Text = "아이콘 · 문자 또는 이모지" }, icon, 1, 1);
         color.Height = 27;
         color.FlatStyle = FlatStyle.Flat;
-        AddField(fields, "배경색", color);
+        AddField(fields, new Label { Text = "배경색" }, color, 2, 1);
         action.DropDownStyle = ComboBoxStyle.DropDownList;
         action.Items.AddRange(DeckActions.Names);
-        AddField(fields, "실행 동작", action);
-        AddField(fields, "프로그램 경로 / 단축키", target);
+        AddField(fields, new Label { Text = "실행 동작" }, action, 0, 3);
+        AddField(fields, targetLabel, target, 1, 3);
         browse.Text = "프로그램 선택…";
         browse.Height = 28;
         browse.Click += BrowseProgram;
-        fields.Controls.Add(browse);
+        fields.Controls.Add(browse, 2, 4);
         browse.Dock = DockStyle.Top;
+        root.Controls.Add(CreateActionPanel(), 1, 1);
 
         var footer = new FlowLayoutPanel { Dock = DockStyle.Fill, WrapContents = false,
             Padding = new Padding(0, 9, 0, 0) };
         root.Controls.Add(footer, 0, 2);
         root.SetColumnSpan(footer, 2);
-        var apply = MakeButton("아이폰에 적용", (s, e) => Apply());
+        var apply = MakeButton("기기에 적용", (s, e) => Apply());
         apply.BackColor = Color.FromArgb(40, 73, 197);
         apply.ForeColor = Color.White;
         apply.FlatStyle = FlatStyle.Flat;
@@ -587,20 +741,14 @@ internal sealed class DeckEditor : Form
         status.AutoSize = true;
         status.Margin = new Padding(10, 8, 0, 0);
         footer.Controls.Add(status);
-        status.Text = "아이폰 Safari에서 위 주소를 열고 코드를 입력하세요.";
+        status.Text = newlyConnected ? "기기 연결 완료 · 버튼을 설정해 보세요."
+            : "기기의 브라우저에서 위 주소를 열고 코드를 입력하세요.";
 
         name.TextChanged += (s, e) => UpdateButton();
         icon.TextChanged += (s, e) => UpdateButton();
         target.TextChanged += (s, e) => UpdateButton();
         action.SelectedIndexChanged += (s, e) => {
-            if (!loading && action.SelectedIndex >= 0)
-            {
-                loading = true;
-                target.Clear();
-                loading = false;
-            }
-            UpdateTarget();
-            UpdateButton();
+            if (!loading && action.SelectedIndex >= 0) AssignAction(selected, action.SelectedIndex);
         };
         color.Click += (s, e) => {
             using (var picker = new ColorDialog { Color = color.BackColor, FullOpen = true })
@@ -620,13 +768,45 @@ internal sealed class DeckEditor : Form
         SelectTile(0);
     }
 
-    private void RefreshAddresses()
+    private Control CreateActionPanel()
     {
-        string previous = address.Text;
-        address.Items.Clear();
-        foreach (string url in PhoneServer.Addresses(port)) address.Items.Add(url);
-        int index = address.Items.IndexOf(previous);
-        address.SelectedIndex = index >= 0 ? index : 0;
+        var panel = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 1, RowCount = 2,
+            Margin = Padding.Empty };
+        panel.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+        panel.RowStyles.Add(new RowStyle(SizeType.Absolute, 41));
+        panel.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
+        panel.Controls.Add(new Label { Text = "동작", AutoSize = true, Font = new Font(Font, FontStyle.Bold),
+            Margin = new Padding(4, 7, 0, 0) }, 0, 0);
+        var actions = new TreeView { Dock = DockStyle.Fill, HideSelection = false,
+            BorderStyle = BorderStyle.FixedSingle, ShowLines = false, ItemHeight = 27, Margin = Padding.Empty };
+        panel.Controls.Add(actions, 0, 1);
+        var system = actions.Nodes.Add("시스템");
+        AddAction(system, 7);
+        AddAction(system, 8);
+        var media = actions.Nodes.Add("미디어");
+        for (int i = 1; i <= 6; i++) AddAction(media, i);
+        actions.ExpandAll();
+        actions.ItemDrag += (s, e) => {
+            var node = (TreeNode)e.Item;
+            if (!(node.Tag is int) || e.Button != MouseButtons.Left) return;
+            var data = new DataObject(ActionFormat, DeckActions.Ids[(int)node.Tag]);
+            try { actions.DoDragDrop(data, DragDropEffects.Copy); }
+            finally { HighlightDropTarget(-1); }
+        };
+        actions.NodeMouseDoubleClick += (s, e) => {
+            if (e.Node.Tag is int) AssignAction(selected, (int)e.Node.Tag);
+        };
+        actions.KeyDown += (s, e) => {
+            if (e.KeyCode != Keys.Enter || actions.SelectedNode == null || !(actions.SelectedNode.Tag is int)) return;
+            AssignAction(selected, (int)actions.SelectedNode.Tag);
+            e.SuppressKeyPress = true;
+        };
+        return panel;
+    }
+
+    private static void AddAction(TreeNode category, int index)
+    {
+        category.Nodes.Add(new TreeNode(DeckActions.Names[index]) { Tag = index });
     }
 
     private static string ReadRepository()
@@ -781,10 +961,12 @@ internal sealed class DeckEditor : Form
         bar.Controls.Add(control);
     }
 
-    private static void AddField(TableLayoutPanel fields, string label, Control control)
+    private static void AddField(TableLayoutPanel fields, Label label, Control control, int column, int row)
     {
-        fields.Controls.Add(new Label { Text = label, AutoSize = true, Margin = new Padding(3, 7, 3, 1) });
-        fields.Controls.Add(control);
+        label.AutoSize = true;
+        label.Margin = new Padding(3, 4, 3, 1);
+        fields.Controls.Add(label, column, row);
+        fields.Controls.Add(control, column, row + 1);
         control.Dock = DockStyle.Top;
     }
 
@@ -800,7 +982,7 @@ internal sealed class DeckEditor : Form
         draft.rows = (int)rows.Value;
         int total = draft.columns * draft.rows;
         while (draft.buttons.Count < total)
-            draft.buttons.Add(DeckStore.Button("", "", "#39455D", "none"));
+            draft.buttons.Add(DeckActions.DefaultButton(0));
         selected = Math.Min(selected, total - 1);
         Rebuild();
         SelectTile(selected);
@@ -844,6 +1026,13 @@ internal sealed class DeckEditor : Form
                 if (dropTarget == index) HighlightDropTarget(-1);
             };
             tile.DragDrop += (s, e) => {
+                HighlightDropTarget(-1);
+                int pickedAction = ActionFromDrop(e.Data);
+                if (pickedAction > 0)
+                {
+                    AssignAction(index, pickedAction);
+                    return;
+                }
                 object data = e.Data.GetData(typeof(int));
                 if (!(data is int)) return;
                 int from = (int)data;
@@ -887,9 +1076,15 @@ internal sealed class DeckEditor : Form
 
     private void UpdateDropTarget(DragEventArgs args, int index)
     {
-        if (dragSource < 0 || !args.Data.GetDataPresent(typeof(int))) return;
-        args.Effect = DragDropEffects.Move;
+        if (ActionFromDrop(args.Data) > 0) args.Effect = DragDropEffects.Copy;
+        else if (dragSource >= 0 && args.Data.GetDataPresent(typeof(int))) args.Effect = DragDropEffects.Move;
+        else return;
         HighlightDropTarget(index == dragSource ? -1 : index);
+    }
+
+    private static int ActionFromDrop(IDataObject data)
+    {
+        return Array.IndexOf(DeckActions.Ids, data.GetData(ActionFormat, false) as string);
     }
 
     private void HighlightDropTarget(int index)
@@ -906,7 +1101,7 @@ internal sealed class DeckEditor : Form
         selected = index;
         DeckButton button = draft.buttons[index];
         loading = true;
-        selection.Text = (index / draft.columns + 1) + "행 " + (index % draft.columns + 1) + "열";
+        selection.Text = "버튼 설정 · " + (index / draft.columns + 1) + "행 " + (index % draft.columns + 1) + "열";
         name.Text = button.label;
         icon.Text = button.icon;
         color.BackColor = ParseColor(button.color);
@@ -919,8 +1114,31 @@ internal sealed class DeckEditor : Form
 
     private void UpdateTarget()
     {
-        target.Enabled = action.SelectedIndex >= 7;
-        browse.Enabled = action.SelectedIndex == 7;
+        bool opensProgram = action.SelectedIndex == 7;
+        targetLabel.Text = opensProgram ? "프로그램 경로" : "단축키";
+        targetLabel.Visible = target.Visible = action.SelectedIndex >= 7;
+        browse.Visible = opensProgram;
+    }
+
+    private void AssignAction(int index, int next)
+    {
+        DeckButton button = draft.buttons[index];
+        if (button.action != DeckActions.Ids[next])
+        {
+            int previous = Math.Max(0, Array.IndexOf(DeckActions.Ids, button.action));
+            DeckButton oldDefault = DeckActions.DefaultButton(previous);
+            DeckButton newDefault = DeckActions.DefaultButton(next);
+            if (String.IsNullOrWhiteSpace(button.label) || button.label == oldDefault.label)
+                button.label = newDefault.label;
+            if (String.IsNullOrWhiteSpace(button.icon) || button.icon == oldDefault.icon)
+                button.icon = newDefault.icon;
+            if (String.Equals(button.color, oldDefault.color, StringComparison.OrdinalIgnoreCase))
+                button.color = newDefault.color;
+            button.action = newDefault.action;
+            button.target = "";
+            MarkDirty();
+        }
+        SelectTile(index);
     }
 
     private void UpdateButton()
@@ -962,7 +1180,7 @@ internal sealed class DeckEditor : Form
     private void MarkDirty()
     {
         dirty = true;
-        status.Text = "편집 중 · 적용하면 아이폰에 반영돼요.";
+        status.Text = "편집 중 · 적용하면 연결한 기기에 반영돼요.";
     }
 
     private void Apply()
@@ -989,7 +1207,7 @@ internal sealed class DeckEditor : Form
             }
             store.Save(draft);
             dirty = false;
-            status.Text = "적용 완료 · 아이폰이 배치를 자동으로 불러와요.";
+            status.Text = "적용 완료 · 연결한 기기가 배치를 자동으로 불러와요.";
         }
         catch (Exception error)
         {
@@ -1019,14 +1237,30 @@ internal static class Program
                 string folder = InstallPaths.IsInstalled ? InstallPaths.Data : AppDomain.CurrentDomain.BaseDirectory;
                 Directory.CreateDirectory(folder);
                 string web = Path.Combine(folder, "phone");
-                var store = new DeckStore(Path.Combine(folder, "layout.json"));
-                using (var server = new PhoneServer(store, web))
-                    Application.Run(new DeckEditor(store, server.Code, server.PortNumber));
+                RunDeck(folder, web);
             }
             catch (Exception error)
             {
                 MessageBox.Show(error.Message, "Pocket Deck", MessageBoxButtons.OK, MessageBoxIcon.Error);
             }
+        }
+    }
+
+    private static void RunDeck(string folder, string web)
+    {
+        string layout = Path.Combine(folder, "layout.json");
+        var pairing = new DevicePairing(Path.Combine(folder, "device-connection.txt"), File.Exists(layout));
+        var store = new DeckStore(layout);
+        using (var server = new PhoneServer(store, web, code: pairing.Code))
+        {
+            bool newlyConnected = !pairing.Completed;
+            if (newlyConnected)
+            {
+                using (var window = new PairingWindow(server))
+                    if (window.ShowDialog() != DialogResult.OK) return;
+                pairing.Complete();
+            }
+            Application.Run(new DeckEditor(store, server.Code, server.PortNumber, newlyConnected));
         }
     }
 
