@@ -15,7 +15,7 @@ internal static class Setup
             if (args.Length == 2 && args[0] == "--update" && Int32.TryParse(args[1], out pid))
             {
                 InstallPaths.WaitFor(pid);
-                InstallPaths.Install(null);
+                InstallPaths.Install();
                 InstallPaths.Start(InstallPaths.ProgramPath, "");
                 return;
             }
@@ -30,9 +30,6 @@ internal static class Setup
 
 internal sealed class SetupWindow : Form
 {
-    private readonly TextBox migration = new TextBox();
-    private readonly CheckBox launch = new CheckBox();
-
     public SetupWindow()
     {
         Text = "Pocket Deck " + BuildInfo.Version + " 설치";
@@ -40,42 +37,29 @@ internal sealed class SetupWindow : Form
         FormBorderStyle = FormBorderStyle.FixedDialog;
         MaximizeBox = false;
         MinimizeBox = false;
-        ClientSize = new Size(565, 220);
+        ClientSize = new Size(565, 153);
         Font = new Font("Malgun Gothic", 9F);
         var layout = new TableLayoutPanel { Dock = DockStyle.Fill, Padding = new Padding(16),
-            ColumnCount = 2, RowCount = 6 };
+            ColumnCount = 2, RowCount = 4 };
         layout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
         layout.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 100));
         layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 23));
-        layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 32));
-        layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 24));
-        layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 33));
+        layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 27));
         layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 32));
         layout.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
         Controls.Add(layout);
         AddLine(layout, 0, new Label { Text = "설치 위치", AutoSize = true });
-        AddLine(layout, 1, new TextBox { Text = InstallPaths.ProgramDirectory, ReadOnly = true,
-            Dock = DockStyle.Top, TabStop = false });
-        AddLine(layout, 2, new Label { Text = "기존 배치와 디자인을 가져올 압축판 폴더 (선택)", AutoSize = true });
-        layout.Controls.Add(migration, 0, 3);
-        migration.Dock = DockStyle.Top;
-        var pick = new Button { Text = "폴더 선택…", Dock = DockStyle.Top, Height = 27 };
-        pick.Click += (s, e) => {
-            using (var dialog = new FolderBrowserDialog { ShowNewFolderButton = false })
-                if (dialog.ShowDialog(this) == DialogResult.OK) migration.Text = dialog.SelectedPath;
-        };
-        layout.Controls.Add(pick, 1, 3);
-        launch.Text = "설치 후 Pocket Deck 열기";
-        launch.Checked = true;
-        launch.AutoSize = true;
-        AddLine(layout, 4, launch);
+        AddLine(layout, 1, new Label { Text = InstallPaths.ProgramDirectory, AutoEllipsis = true,
+            UseMnemonic = false, Dock = DockStyle.Fill });
+        var launch = new CheckBox { Text = "설치 후 Pocket Deck 열기", Checked = true, AutoSize = true };
+        AddLine(layout, 2, launch);
         var install = new Button { Text = "설치", Dock = DockStyle.Fill };
-        layout.Controls.Add(install, 1, 5);
+        layout.Controls.Add(install, 1, 3);
         AcceptButton = install;
         install.Click += (s, e) => {
             try
             {
-                InstallPaths.Install(migration.Text.Trim());
+                InstallPaths.Install();
                 if (launch.Checked) InstallPaths.Start(InstallPaths.ProgramPath, "");
                 Close();
             }

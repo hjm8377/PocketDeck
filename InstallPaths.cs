@@ -58,10 +58,10 @@ internal static class InstallPaths
         finally { if (File.Exists(temp)) File.Delete(temp); }
     }
 
-    public static void Install(string migration)
+    public static void Install()
     {
         WithAppClosed(() => {
-            InstallFiles(ProgramPath, Data, migration);
+            InstallFiles(ProgramPath, Data);
             CreateShortcut();
             using (RegistryKey entry = Registry.CurrentUser.CreateSubKey(UninstallKey))
             {
@@ -76,7 +76,7 @@ internal static class InstallPaths
         });
     }
 
-    public static void InstallFiles(string program, string data, string migration)
+    public static void InstallFiles(string program, string data)
     {
         if (File.Exists(program))
         {
@@ -86,34 +86,7 @@ internal static class InstallPaths
                 throw new InvalidOperationException("이미 더 새로운 Pocket Deck이 설치되어 있습니다.");
         }
         Directory.CreateDirectory(data);
-        if (!String.IsNullOrWhiteSpace(migration)) Migrate(migration, data);
         using (var payload = Resource("PocketDeck.Payload")) WriteAtomic(program, payload);
-    }
-
-    public static void Migrate(string source, string data)
-    {
-        if (!File.Exists(Path.Combine(source, "PocketDeck.exe")) ||
-            !File.Exists(Path.Combine(source, "phone", "index.html")))
-            throw new InvalidDataException("기존 PocketDeck.exe와 phone 폴더가 있는 압축판 폴더를 선택해 주세요.");
-        string layout = Path.Combine(source, "layout.json");
-        if (File.Exists(layout) && !File.Exists(Path.Combine(data, "layout.json")))
-            CopyFile(layout, Path.Combine(data, "layout.json"));
-        foreach (string name in new[] { "index.html", "phone.css", "phone.js" })
-        {
-            string old = Path.Combine(source, "phone", name);
-            string target = Path.Combine(data, "phone", name);
-            if (!File.Exists(old) || File.Exists(target)) continue;
-            string current = ReadResource("Phone." + name);
-            if (Normalize(File.ReadAllText(old)) != Normalize(current)) CopyFile(old, target);
-        }
-    }
-
-    private static string Normalize(string text) { return text.Replace("\r\n", "\n").TrimEnd(); }
-
-    private static void CopyFile(string source, string target)
-    {
-        Directory.CreateDirectory(Path.GetDirectoryName(target));
-        File.Copy(source, target, false);
     }
 
     private static void CreateShortcut()
