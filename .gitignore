@@ -1,0 +1,4 @@
+dist/
+layout.json
+*.tmp
+*.exe

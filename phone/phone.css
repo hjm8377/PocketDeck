@@ -1,0 +1,91 @@
+:root {
+  color-scheme: dark;
+  --surface: #0e1320;
+  --muted: #adb8cf;
+  --accent: #4267f4;
+  --gap: clamp(7px, 1.5vmin, 14px);
+  --radius: 16px;
+  font-family: -apple-system, BlinkMacSystemFont, system-ui, sans-serif;
+  background: var(--surface);
+  color: #f5f7ff;
+}
+
+* { box-sizing: border-box; }
+[hidden] { display: none !important; }
+
+body {
+  min-height: 100dvh;
+  margin: 0;
+  padding: max(10px, env(safe-area-inset-top)) max(12px, env(safe-area-inset-right))
+    max(12px, env(safe-area-inset-bottom)) max(12px, env(safe-area-inset-left));
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+h1 { margin: 0; font-size: 16px; letter-spacing: -0.03em; }
+#status { margin: 0; color: var(--muted); text-align: right; font-size: 12px; }
+#status[data-state="ready"] { color: #a3dcc1; }
+#status[data-state="error"] { color: #ffb5b2; }
+
+main { flex: 1; display: grid; }
+
+#deck {
+  display: grid;
+  grid-template-columns: repeat(var(--columns, 3), minmax(0, 1fr));
+  grid-template-rows: repeat(var(--rows, 2), minmax(56px, 1fr));
+  gap: var(--gap);
+}
+
+button, input { font: inherit; }
+
+.tile {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: clamp(2px, 1.4vmin, 7px);
+  padding: 5px;
+  border: 1px solid #ffffff28;
+  border-radius: var(--radius);
+  background: var(--button-bg, #39455d);
+  color: var(--button-fg, white);
+  touch-action: manipulation;
+  -webkit-tap-highlight-color: transparent;
+  user-select: none;
+  overflow: hidden;
+}
+
+.tile:active { filter: brightness(1.18); }
+.tile:disabled { opacity: 0.4; }
+.tile-icon { font-size: clamp(16px, 5vmin, 38px); line-height: 1; }
+.tile-icon:empty, .tile-label:empty { display: none; }
+.tile-label { font-size: clamp(10px, 3.1vmin, 17px); font-weight: 650; line-height: 1.2; overflow-wrap: anywhere; }
+
+#pair {
+  place-self: center;
+  width: min(100%, 340px);
+  padding: 20px;
+  display: grid;
+  gap: 10px;
+  border: 1px solid #303a50;
+  border-radius: var(--radius);
+  background: #171e2d;
+}
+
+#pair h2 { margin: 0 0 4px; font-size: 20px; }
+#pair label { color: var(--muted); font-size: 13px; }
+#pair input, #pair button { min-height: 44px; border-radius: 9px; padding: 8px 10px; }
+#pair input { min-width: 0; border: 1px solid #465572; background: var(--surface); letter-spacing: 0.13em; }
+#pair button { border: 0; background: var(--accent); color: white; font-weight: 700; }
+
+@media (orientation: portrait) {
+  #deck { grid-template-rows: repeat(var(--rows, 2), minmax(56px, clamp(80px, 24vw, 150px))); }
+}

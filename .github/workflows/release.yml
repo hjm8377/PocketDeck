@@ -1,0 +1,32 @@
+name: Windows release
+
+on:
+  push:
+    tags:
+      - 'v[0-9]+.[0-9]+.[0-9]+'
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build the Windows installer
+        shell: pwsh
+        run: |
+          $source = Get-Content -Raw BuildInfo.cs
+          $version = [regex]::Match($source, 'Version = "([0-9]+\.[0-9]+\.[0-9]+)"').Groups[1].Value
+          if (-not $version -or $env:GITHUB_REF_NAME -ne "v$version") {
+            throw "The release tag must match BuildInfo.cs."
+          }
+          .\Build.cmd
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Publish the installer
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create $env:GITHUB_REF_NAME dist/PocketDeckSetup.exe --verify-tag --generate-notes --latest
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }

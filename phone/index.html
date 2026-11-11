@@ -1,0 +1,34 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="theme-color" content="#0e1320">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <title>Pocket Deck</title>
+  <link rel="stylesheet" href="/phone.css">
+  <script src="/phone.js" defer></script>
+</head>
+<body>
+  <header class="bar">
+    <h1>Pocket Deck</h1>
+    <p id="status" role="status">연결 대기 중</p>
+  </header>
+  <main>
+    <form id="pair">
+      <h2>PC에 연결</h2>
+      <label for="code">PC 앱에 표시된 연결 코드</label>
+      <input id="code" name="code" type="text" maxlength="8" autocapitalize="characters"
+        autocomplete="off" spellcheck="false" required>
+      <button type="submit">연결</button>
+    </form>
+    <section id="deck" aria-label="PC 제어 버튼" hidden></section>
+  </main>
+  <template id="button-template">
+    <button class="tile" type="button">
+      <span class="tile-icon" aria-hidden="true"></span>
+      <span class="tile-label"></span>
+    </button>
+  </template>
+</body>
+</html>
