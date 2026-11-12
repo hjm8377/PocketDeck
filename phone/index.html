@@ -17,8 +17,8 @@
   <main>
     <form id="pair">
       <h2>PC에 연결</h2>
-      <label for="code">PC 앱에 표시된 연결 코드</label>
-      <input id="code" name="code" type="text" maxlength="8" autocapitalize="characters"
+      <label for="code">PC 앱에 표시된 8자리 연결 코드</label>
+      <input id="code" name="code" type="text" inputmode="numeric" pattern="[0-9]{8}" maxlength="8"
         autocomplete="off" spellcheck="false" required>
       <button type="submit">연결</button>
     </form>

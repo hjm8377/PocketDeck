@@ -6,7 +6,7 @@ const pair = document.querySelector('#pair');
 const codeInput = document.querySelector('#code');
 const template = document.querySelector('#button-template');
 const storageKey = 'pocket-deck-code';
-let code = location.hash.slice(1).toUpperCase();
+let code = location.hash.slice(1);
 let version;
 let loading = false;
 let noticeUntil = 0;
@@ -15,6 +15,7 @@ try {
   code ||= localStorage.getItem(storageKey) || '';
   if (location.hash) history.replaceState(null, '', '/');
 } catch { /* A private browsing session can still pair for the current page. */ }
+if (!/^[0-9]{8}$/.test(code)) code = '';
 
 function setStatus(message, state) {
   status.textContent = message;
@@ -59,12 +60,31 @@ function draw(layout) {
     tile.style.setProperty('--button-bg', background);
     tile.style.setProperty('--button-fg', light ? '#111827' : '#ffffff');
     tile.querySelector('.tile-label').textContent = label;
-    tile.querySelector('.tile-icon').textContent = icon;
+    const iconSlot = tile.querySelector('.tile-icon');
+    iconSlot.textContent = icon || (button.appIcon ? '↗' : '');
+    if (button.appIcon) showAppIcon(iconSlot, layout.version, index);
     tile.setAttribute('aria-label', label || icon || `${index + 1}번 버튼`);
     tile.disabled = !button.enabled;
     tile.addEventListener('click', () => press(index, layout.version));
     return tile;
   }));
+}
+
+async function showAppIcon(slot, layoutVersion, index) {
+  try {
+    const response = await request(`/api/icon/${layoutVersion}/${index}`);
+    if (!response.ok) return;
+    const url = URL.createObjectURL(await response.blob());
+    const image = new Image(32, 32);
+    image.alt = '';
+    image.className = 'tile-app-icon';
+    image.onload = () => {
+      slot.replaceChildren(image);
+      URL.revokeObjectURL(url);
+    };
+    image.onerror = () => URL.revokeObjectURL(url);
+    image.src = url;
+  } catch { /* Keep the program symbol if its icon is unavailable. */ }
 }
 
 async function refresh() {
@@ -108,7 +128,7 @@ async function press(index, buttonVersion) {
 pair.addEventListener('submit', event => {
   event.preventDefault();
   if (loading) return;
-  code = codeInput.value.trim().toUpperCase();
+  code = codeInput.value.trim();
   noticeUntil = 0;
   setStatus('PC에 연결 중', 'pending');
   refresh();

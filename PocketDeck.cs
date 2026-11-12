@@ -86,7 +86,7 @@ internal static class DeckActions
     public static readonly string[] Ids = {
         "none", "play", "previous", "next", "volumeDown", "volumeUp", "mute", "open", "shortcut"
     };
-    private static readonly string[] Icons = { "", "⏯", "⏮", "⏭", "−", "+", "♪", "↗", "⌨" };
+    private static readonly string[] Icons = { "", "⏯", "⏮", "⏭", "−", "+", "♪", "", "⌨" };
     private static readonly string[] Colors = {
         "#39455D", "#365CE8", "#39455D", "#39455D", "#275D59", "#275D59", "#744669", "#28547D", "#684997"
     };
@@ -104,6 +104,25 @@ internal static class DeckActions
             label = action == 0 ? "" : Names[action], icon = Icons[action],
             color = Colors[action], action = Ids[action], target = ""
         };
+    }
+
+    public static bool UsesProgramIcon(DeckButton button)
+    {
+        return button.action == "open" && (String.IsNullOrWhiteSpace(button.icon) || button.icon == "↗");
+    }
+
+    public static Bitmap ReadProgramIcon(string path)
+    {
+        try
+        {
+            if (!File.Exists(path) || !String.Equals(Path.GetExtension(path), ".exe", StringComparison.OrdinalIgnoreCase))
+                return null;
+            using (var icon = Icon.ExtractAssociatedIcon(path)) return icon == null ? null : icon.ToBitmap();
+        }
+        catch (ArgumentException) { return null; }
+        catch (IOException) { return null; }
+        catch (UnauthorizedAccessException) { return null; }
+        catch (System.ComponentModel.Win32Exception) { return null; }
     }
 
     public static void Run(DeckButton button)
@@ -185,7 +204,7 @@ internal static class DeckActions
 
 internal sealed class DevicePairing
 {
-    private const string Alphabet = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
+    private const int CodeLength = 8;
     private readonly string path;
     public readonly string Code;
     public bool Completed { get; private set; }
@@ -194,11 +213,11 @@ internal sealed class DevicePairing
     {
         this.path = path;
         bool exists = File.Exists(path);
+        bool completed = !exists && previouslyLaunched;
         if (exists)
         {
             string[] lines = File.ReadAllLines(path, Encoding.UTF8);
-            bool completed;
-            if (lines.Length == 2 && ValidCode(lines[0]) && Boolean.TryParse(lines[1], out completed))
+            if (lines.Length == 2 && Boolean.TryParse(lines[1], out completed) && ValidCode(lines[0]))
             {
                 Code = lines[0];
                 Completed = completed;
@@ -206,23 +225,34 @@ internal sealed class DevicePairing
             }
         }
         Code = CreateCode();
-        Save(!exists && previouslyLaunched);
+        Save(completed);
     }
 
     private static bool ValidCode(string code)
     {
-        if (code.Length != 8) return false;
+        if (code.Length != CodeLength) return false;
         foreach (char character in code)
-            if (Alphabet.IndexOf(character) < 0) return false;
+            if (character < '0' || character > '9') return false;
         return true;
     }
 
     public static string CreateCode()
     {
-        byte[] random = new byte[8];
-        using (RandomNumberGenerator rng = RandomNumberGenerator.Create()) rng.GetBytes(random);
-        StringBuilder code = new StringBuilder();
-        foreach (byte value in random) code.Append(Alphabet[value & 31]);
+        byte[] random = new byte[16];
+        var code = new StringBuilder(CodeLength);
+        using (RandomNumberGenerator rng = RandomNumberGenerator.Create())
+        {
+            while (code.Length < CodeLength)
+            {
+                rng.GetBytes(random);
+                foreach (byte value in random)
+                {
+                    if (value >= 250) continue;
+                    code.Append((char)('0' + value % 10));
+                    if (code.Length == CodeLength) break;
+                }
+            }
+        }
         return code.ToString();
     }
 
@@ -268,7 +298,7 @@ internal sealed class PhoneServer : IDisposable
 
     public void Dispose() { listener.Stop(); }
 
-    public static List<string> Addresses(int port, bool includeLoopback)
+    public static List<string> Addresses(int port)
     {
         List<string> result = new List<string>();
         foreach (NetworkInterface adapter in NetworkInterface.GetAllNetworkInterfaces())
@@ -289,7 +319,6 @@ internal sealed class PhoneServer : IDisposable
                 else result.Add(address);
             }
         }
-        if (includeLoopback) result.Add(Url("127.0.0.1", port));
         return result;
     }
 
@@ -375,12 +404,33 @@ internal sealed class PhoneServer : IDisposable
             {
                 DeckButton button = deck.buttons[i];
                 buttons.Add(new { label = button.label, icon = button.icon, color = button.color,
-                    enabled = button.action != "none" });
+                    enabled = button.action != "none", appIcon = DeckActions.UsesProgramIcon(button) });
             }
             Reply(stream, "200 OK", "application/json", new JavaScriptSerializer().Serialize(
                 new { version = deck.version, columns = deck.columns, rows = deck.rows, buttons = buttons }));
             ObserveLayoutRequest(((IPEndPoint)client.Client.RemoteEndPoint).Address, local.Address);
             return;
+        }
+        const string iconRoute = "/api/icon/";
+        if (method == "GET" && route.StartsWith(iconRoute, StringComparison.Ordinal))
+        {
+            string[] parts = route.Substring(iconRoute.Length).Split('/');
+            DeckLayout deck = store.Read();
+            int index;
+            if (parts.Length == 2 && parts[0] == deck.version && Int32.TryParse(parts[1], out index) &&
+                index >= 0 && index < deck.columns * deck.rows && DeckActions.UsesProgramIcon(deck.buttons[index]))
+            {
+                using (var icon = DeckActions.ReadProgramIcon(deck.buttons[index].target))
+                using (var png = new MemoryStream())
+                {
+                    if (icon != null)
+                    {
+                        icon.Save(png, System.Drawing.Imaging.ImageFormat.Png);
+                        ReplyBytes(stream, "200 OK", "image/png", png.ToArray());
+                        return;
+                    }
+                }
+            }
         }
         const string press = "/api/press/";
         if (method == "POST" && route.StartsWith(press, StringComparison.Ordinal))
@@ -433,10 +483,14 @@ internal sealed class PhoneServer : IDisposable
 
     private static void Reply(NetworkStream stream, string status, string type, string body)
     {
-        byte[] bytes = Encoding.UTF8.GetBytes(body);
+        ReplyBytes(stream, status, type + "; charset=utf-8", Encoding.UTF8.GetBytes(body));
+    }
+
+    private static void ReplyBytes(NetworkStream stream, string status, string type, byte[] bytes)
+    {
         string length = status.StartsWith("204") ? "" : "Content-Length: " + bytes.Length + "\r\n";
         byte[] header = Encoding.ASCII.GetBytes("HTTP/1.1 " + status +
-            "\r\nContent-Type: " + type + "; charset=utf-8\r\n" + length +
+            "\r\nContent-Type: " + type + "\r\n" + length +
             "Connection: close\r\nCache-Control: no-store\r\nX-Content-Type-Options: nosniff\r\n\r\n");
         stream.Write(header, 0, header.Length);
         if (bytes.Length > 0) stream.Write(bytes, 0, bytes.Length);
@@ -445,8 +499,11 @@ internal sealed class PhoneServer : IDisposable
 
 internal sealed class DragGhost : Form
 {
+    private readonly Image image;
+
     public DragGhost(Button tile)
     {
+        if (tile.Image != null) image = (Image)tile.Image.Clone();
         Text = tile.Text;
         Font = tile.Font;
         BackColor = tile.BackColor;
@@ -498,21 +555,30 @@ internal sealed class DragGhost : Form
             e.Graphics.SmoothingMode = SmoothingMode.AntiAlias;
             e.Graphics.TextRenderingHint = System.Drawing.Text.TextRenderingHint.AntiAliasGridFit;
             e.Graphics.DrawRectangle(border, 1, 1, ClientSize.Width - 2, ClientSize.Height - 2);
+            int textTop = 5;
+            if (image != null)
+            {
+                e.Graphics.DrawImage(image, (ClientSize.Width - 26) / 2, 8, 26, 26);
+                textTop = 35;
+            }
             e.Graphics.DrawString(Text, Font, text,
-                new RectangleF(5, 5, ClientSize.Width - 10, ClientSize.Height - 10), format);
+                new RectangleF(5, textTop, ClientSize.Width - 10, ClientSize.Height - textTop - 5), format);
         }
+    }
+
+    protected override void Dispose(bool disposing)
+    {
+        if (disposing && image != null) image.Dispose();
+        base.Dispose(disposing);
     }
 }
 
 internal sealed class DeviceAddressPicker : ComboBox
 {
     private readonly int port;
-    private readonly bool includeLoopback;
-
-    public DeviceAddressPicker(int port, bool includeLoopback)
+    public DeviceAddressPicker(int port)
     {
         this.port = port;
-        this.includeLoopback = includeLoopback;
         DropDownStyle = ComboBoxStyle.DropDownList;
         Width = 203;
         RefreshAddresses();
@@ -522,7 +588,7 @@ internal sealed class DeviceAddressPicker : ComboBox
     {
         string previous = Text;
         Items.Clear();
-        foreach (string url in PhoneServer.Addresses(port, includeLoopback)) Items.Add(url);
+        foreach (string url in PhoneServer.Addresses(port)) Items.Add(url);
         if (Items.Count == 0) return;
         int index = Items.IndexOf(previous);
         SelectedIndex = index >= 0 ? index : 0;
@@ -533,7 +599,9 @@ internal sealed class PairingWindow : Form
 {
     private readonly System.Windows.Forms.Timer timer = new System.Windows.Forms.Timer { Interval = 200 };
 
-    public PairingWindow(PhoneServer server)
+    public PairingWindow(PhoneServer server) : this(server.Code, server.PortNumber, server) { }
+
+    public PairingWindow(string code, int port, PhoneServer pending = null)
     {
         Text = "Pocket Deck · 기기 연결";
         ClientSize = new Size(530, 270);
@@ -555,38 +623,54 @@ internal sealed class PairingWindow : Form
             AutoSize = true };
         content.Controls.Add(heading, 0, 0);
         content.Controls.Add(new Label {
-            Text = "PC와 기기를 같은 공유기에 연결하세요.\n기기 브라우저에서 주소를 열고 연결 코드를 입력하세요.",
+            Text = "PC와 기기를 같은 공유기에 연결하세요.\n기기 브라우저에서 주소를 열고 8자리 숫자를 입력하세요.",
             AutoSize = true
         }, 0, 1);
         content.Controls.Add(new Label { Text = "접속 주소", AutoSize = true }, 0, 2);
 
         var connection = new FlowLayoutPanel { Dock = DockStyle.Fill, WrapContents = false, Margin = Padding.Empty };
         content.Controls.Add(connection, 0, 3);
-        var address = new DeviceAddressPicker(server.PortNumber, false) { Width = 235 };
+        var address = new DeviceAddressPicker(port) { Width = 235 };
         var refresh = new Button { Text = "새로고침", AutoSize = true };
         var copy = new Button { Text = "연결 링크 복사", AutoSize = true, Enabled = address.SelectedIndex >= 0 };
         connection.Controls.AddRange(new Control[] { address, refresh, copy });
-        copy.Click += (s, e) => Clipboard.SetText(address.Text + "#" + server.Code);
-        content.Controls.Add(new Label { Text = "연결 코드  " + server.Code, AutoSize = true,
+        copy.Click += (s, e) => Clipboard.SetText(address.Text + "#" + code);
+        content.Controls.Add(new Label { Text = "연결 코드  " + code, AutoSize = true,
             Font = new Font(Font, FontStyle.Bold) }, 0, 4);
         var status = new Label { AutoSize = true, ForeColor = Color.FromArgb(57, 69, 93) };
         content.Controls.Add(status, 0, 5);
         Action showStatus = () => {
             copy.Enabled = address.SelectedIndex >= 0;
-            status.Text = copy.Enabled
-                ? "연결을 기다리는 중 · 연결되면 버튼 설정이 열려요."
-                : "PC 네트워크를 확인한 뒤 주소를 새로고침하세요.";
+            status.Text = !copy.Enabled ? "PC 네트워크를 확인한 뒤 주소를 새로고침하세요."
+                : pending != null ? "연결을 기다리는 중 · 연결되면 버튼 설정이 열려요." : "";
         };
         address.SelectedIndexChanged += (s, e) => showStatus();
         refresh.Click += (s, e) => { address.RefreshAddresses(); showStatus(); };
         showStatus();
 
-        timer.Tick += (s, e) => {
-            if (!server.RemoteConnected) return;
-            timer.Stop();
-            DialogResult = DialogResult.OK;
-        };
-        Shown += (s, e) => timer.Start();
+        if (pending != null)
+        {
+            timer.Tick += (s, e) => {
+                if (!pending.RemoteConnected) return;
+                timer.Stop();
+                DialogResult = DialogResult.OK;
+            };
+            Shown += (s, e) => timer.Start();
+        }
+        else
+        {
+            var preview = new Button { Text = "PC에서 미리 열기", AutoSize = true };
+            preview.Click += (s, e) => {
+                using (Process.Start(new ProcessStartInfo("http://127.0.0.1:" + port + "/#" + code) {
+                    UseShellExecute = true
+                })) { }
+            };
+            content.RowCount = 7;
+            content.RowStyles.Add(new RowStyle(SizeType.Absolute, 25));
+            content.SetRow(status, 6);
+            content.Controls.Add(preview, 0, 5);
+            ClientSize = new Size(530, 295);
+        }
     }
 
     protected override void Dispose(bool disposing)
@@ -600,14 +684,13 @@ internal sealed class DeckEditor : Form
 {
     private const string ActionFormat = "PocketDeck.Action";
     private readonly DeckStore store;
-    private readonly string connectionCode;
-    private readonly int port;
     private readonly DeckLayout draft;
     private readonly TableLayoutPanel preview = new TableLayoutPanel();
     private readonly NumericUpDown columns = new NumericUpDown();
     private readonly NumericUpDown rows = new NumericUpDown();
     private readonly TextBox name = new TextBox();
     private readonly TextBox icon = new TextBox();
+    private readonly Label iconLabel = new Label();
     private readonly TextBox target = new TextBox();
     private readonly Label targetLabel = new Label();
     private readonly ComboBox action = new ComboBox();
@@ -615,10 +698,10 @@ internal sealed class DeckEditor : Form
     private readonly Button browse = new Button();
     private readonly Label status = new Label();
     private readonly Label selection = new Label();
-    private readonly DeviceAddressPicker address;
     private readonly List<Button> tiles = new List<Button>();
     private readonly ToolStripMenuItem appMenu = new ToolStripMenuItem("Pocket Deck");
     private readonly ToolStripMenuItem updateMenu = new ToolStripMenuItem("업데이트 확인");
+    private readonly ToolStripMenuItem repositoryMenu = new ToolStripMenuItem("GitHub 업데이트 저장소…");
     private UpdateAsset availableUpdate;
     private bool checkingUpdate;
     private int selected;
@@ -627,12 +710,9 @@ internal sealed class DeckEditor : Form
     private bool loading;
     private bool dirty;
 
-    public DeckEditor(DeckStore store, string connectionCode, int port, bool newlyConnected = false)
+    public DeckEditor(DeckStore store, string connectionCode, int port)
     {
         this.store = store;
-        this.connectionCode = connectionCode;
-        this.port = port;
-        address = new DeviceAddressPicker(port, true);
         draft = store.Read();
         Text = "Pocket Deck " + BuildInfo.Version;
         ClientSize = new Size(960, 600);
@@ -642,11 +722,10 @@ internal sealed class DeckEditor : Form
         AutoScaleMode = AutoScaleMode.Dpi;
         BackColor = Color.FromArgb(245, 247, 251);
 
-        var root = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 2, RowCount = 3,
+        var root = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 2, RowCount = 2,
             Padding = new Padding(16) };
         root.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
         root.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 224));
-        root.RowStyles.Add(new RowStyle(SizeType.Absolute, 49));
         root.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
         root.RowStyles.Add(new RowStyle(SizeType.Absolute, 46));
         Controls.Add(root);
@@ -654,30 +733,32 @@ internal sealed class DeckEditor : Form
         menu.Items.Add(appMenu);
         appMenu.DropDownItems.Add(updateMenu);
         updateMenu.Click += async (s, e) => await CheckUpdates(true);
-        appMenu.DropDownItems.Add("GitHub 업데이트 저장소…", null, (s, e) => ConfigureRepository());
+        appMenu.DropDownItems.Add(repositoryMenu);
+        repositoryMenu.Click += (s, e) => ConfigureRepository();
         appMenu.DropDownItems.Add("기기 화면 디자인 폴더 열기", null, (s, e) => OpenDesignFolder());
+        var settings = new ToolStripMenuItem("설정");
+        menu.Items.Add(settings);
+        settings.DropDownItems.Add("기기 연결…", null, (s, e) => {
+            using (var window = new PairingWindow(connectionCode, port)) window.ShowDialog(this);
+        });
+        var startWithWindows = new ToolStripMenuItem("Windows 시작 시 실행") {
+            Enabled = InstallPaths.IsInstalled
+        };
+        settings.DropDownItems.Add(startWithWindows);
+        settings.DropDownOpening += (s, e) => startWithWindows.Checked = InstallPaths.StartsWithWindows;
+        startWithWindows.Click += (s, e) => {
+            try { InstallPaths.SetStartsWithWindows(!startWithWindows.Checked); }
+            catch (Exception error) { MessageBox.Show(this, error.Message, Text); }
+            startWithWindows.Checked = InstallPaths.StartsWithWindows;
+        };
         if (!InstallPaths.IsInstalled)
         {
             updateMenu.Enabled = false;
-            appMenu.DropDownItems[1].Enabled = false;
+            repositoryMenu.Enabled = false;
         }
         else Shown += async (s, e) => await CheckUpdates(false);
         MainMenuStrip = menu;
         Controls.Add(menu);
-
-        var connection = new FlowLayoutPanel { Dock = DockStyle.Fill, WrapContents = false };
-        root.Controls.Add(connection, 0, 0);
-        root.SetColumnSpan(connection, 2);
-        connection.Controls.Add(new Label { Text = "기기 연결", AutoSize = true, Margin = new Padding(0, 8, 8, 0) });
-        connection.Controls.Add(address);
-        connection.Controls.Add(MakeButton("새로고침", (s, e) => address.RefreshAddresses()));
-        connection.Controls.Add(new Label { Text = "코드  " + connectionCode, AutoSize = true,
-            Margin = new Padding(12, 8, 8, 0) });
-        connection.Controls.Add(MakeButton("링크 복사", (s, e) => Clipboard.SetText(PairUrl())));
-        connection.Controls.Add(MakeButton("PC에서 미리 열기", (s, e) =>
-            Process.Start(new ProcessStartInfo("http://127.0.0.1:" + port + "/#" + connectionCode) {
-                UseShellExecute = true
-            })));
 
         var canvas = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 1, RowCount = 3,
             Margin = new Padding(0, 0, 16, 0) };
@@ -685,7 +766,7 @@ internal sealed class DeckEditor : Form
         canvas.RowStyles.Add(new RowStyle(SizeType.Absolute, 41));
         canvas.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
         canvas.RowStyles.Add(new RowStyle(SizeType.Absolute, 154));
-        root.Controls.Add(canvas, 0, 1);
+        root.Controls.Add(canvas, 0, 0);
         var toolbar = new FlowLayoutPanel { Dock = DockStyle.Fill, WrapContents = false };
         canvas.Controls.Add(toolbar, 0, 0);
         AddSize(toolbar, "열", columns, draft.columns, 5);
@@ -714,7 +795,7 @@ internal sealed class DeckEditor : Form
         icon.MaxLength = 8;
         target.MaxLength = 1024;
         AddField(fields, new Label { Text = "버튼 이름" }, name, 0, 1);
-        AddField(fields, new Label { Text = "아이콘 · 문자 또는 이모지" }, icon, 1, 1);
+        AddField(fields, iconLabel, icon, 1, 1);
         color.Height = 27;
         color.FlatStyle = FlatStyle.Flat;
         AddField(fields, new Label { Text = "배경색" }, color, 2, 1);
@@ -727,11 +808,11 @@ internal sealed class DeckEditor : Form
         browse.Click += BrowseProgram;
         fields.Controls.Add(browse, 2, 4);
         browse.Dock = DockStyle.Top;
-        root.Controls.Add(CreateActionPanel(), 1, 1);
+        root.Controls.Add(CreateActionPanel(), 1, 0);
 
         var footer = new FlowLayoutPanel { Dock = DockStyle.Fill, WrapContents = false,
             Padding = new Padding(0, 9, 0, 0) };
-        root.Controls.Add(footer, 0, 2);
+        root.Controls.Add(footer, 0, 1);
         root.SetColumnSpan(footer, 2);
         var apply = MakeButton("기기에 적용", (s, e) => Apply());
         apply.BackColor = Color.FromArgb(40, 73, 197);
@@ -741,8 +822,6 @@ internal sealed class DeckEditor : Form
         status.AutoSize = true;
         status.Margin = new Padding(10, 8, 0, 0);
         footer.Controls.Add(status);
-        status.Text = newlyConnected ? "기기 연결 완료 · 버튼을 설정해 보세요."
-            : "기기의 브라우저에서 위 주소를 열고 코드를 입력하세요.";
 
         name.TextChanged += (s, e) => UpdateButton();
         icon.TextChanged += (s, e) => UpdateButton();
@@ -854,7 +933,7 @@ internal sealed class DeckEditor : Form
         if (checkingUpdate) return;
         checkingUpdate = true;
         updateMenu.Enabled = false;
-        appMenu.DropDownItems[1].Enabled = false;
+        repositoryMenu.Enabled = false;
         try
         {
             string repository = ReadRepository();
@@ -911,7 +990,7 @@ internal sealed class DeckEditor : Form
             if (!IsDisposed)
             {
                 updateMenu.Enabled = true;
-                appMenu.DropDownItems[1].Enabled = true;
+                repositoryMenu.Enabled = true;
             }
         }
     }
@@ -941,8 +1020,6 @@ internal sealed class DeckEditor : Form
         }
         catch (Exception error) { MessageBox.Show(this, error.Message, Text); }
     }
-
-    private string PairUrl() { return address.Text + "#" + connectionCode; }
 
     private static Button MakeButton(string title, EventHandler onClick)
     {
@@ -1006,7 +1083,9 @@ internal sealed class DeckEditor : Form
         {
             int index = i;
             var tile = new Button { Dock = DockStyle.Fill, Margin = new Padding(5), FlatStyle = FlatStyle.Flat,
-                AllowDrop = true, UseMnemonic = false, Cursor = Cursors.Hand };
+                AllowDrop = true, UseMnemonic = false, Cursor = Cursors.Hand,
+                TextImageRelation = TextImageRelation.ImageAboveText };
+            tile.Disposed += (s, e) => { if (tile.Image != null) tile.Image.Dispose(); };
             tile.Click += (s, e) => SelectTile(index);
             Point? start = null;
             tile.MouseDown += (s, e) => { if (e.Button == MouseButtons.Left) start = e.Location; };
@@ -1115,6 +1194,7 @@ internal sealed class DeckEditor : Form
     private void UpdateTarget()
     {
         bool opensProgram = action.SelectedIndex == 7;
+        iconLabel.Text = opensProgram ? "아이콘 · 비워두면 프로그램 아이콘" : "아이콘 · 문자 또는 이모지";
         targetLabel.Text = opensProgram ? "프로그램 경로" : "단축키";
         targetLabel.Visible = target.Visible = action.SelectedIndex >= 7;
         browse.Visible = opensProgram;
@@ -1130,7 +1210,8 @@ internal sealed class DeckEditor : Form
             DeckButton newDefault = DeckActions.DefaultButton(next);
             if (String.IsNullOrWhiteSpace(button.label) || button.label == oldDefault.label)
                 button.label = newDefault.label;
-            if (String.IsNullOrWhiteSpace(button.icon) || button.icon == oldDefault.icon)
+            if (String.IsNullOrWhiteSpace(button.icon) || button.icon == oldDefault.icon ||
+                DeckActions.UsesProgramIcon(button))
                 button.icon = newDefault.icon;
             if (String.Equals(button.color, oldDefault.color, StringComparison.OrdinalIgnoreCase))
                 button.color = newDefault.color;
@@ -1164,8 +1245,18 @@ internal sealed class DeckEditor : Form
     {
         Button tile = tiles[index];
         DeckButton button = draft.buttons[index];
-        tile.Text = String.IsNullOrWhiteSpace(button.label + button.icon)
-            ? "빈 버튼" : (button.icon + "\n" + button.label).Trim();
+        bool programIcon = DeckActions.UsesProgramIcon(button);
+        string imagePath = programIcon ? button.target : null;
+        if (!String.Equals(tile.Tag as string, imagePath, StringComparison.OrdinalIgnoreCase))
+        {
+            Image oldImage = tile.Image;
+            tile.Image = DeckActions.ReadProgramIcon(imagePath);
+            tile.Tag = imagePath;
+            if (oldImage != null) oldImage.Dispose();
+        }
+        string caption = tile.Image != null ? button.label :
+            ((programIcon ? "↗" : button.icon) + "\n" + button.label).Trim();
+        tile.Text = String.IsNullOrWhiteSpace(caption) ? "빈 버튼" : caption;
         Color background = ParseColor(button.color);
         if (index == dragSource)
             background = Color.FromArgb((background.R + 14) / 2, (background.G + 19) / 2, (background.B + 32) / 2);
@@ -1260,7 +1351,7 @@ internal static class Program
                     if (window.ShowDialog() != DialogResult.OK) return;
                 pairing.Complete();
             }
-            Application.Run(new DeckEditor(store, server.Code, server.PortNumber, newlyConnected));
+            Application.Run(new DeckEditor(store, server.Code, server.PortNumber));
         }
     }
 

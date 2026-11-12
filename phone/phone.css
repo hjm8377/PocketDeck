@@ -66,6 +66,7 @@ button, input { font: inherit; }
 .tile:active { filter: brightness(1.18); }
 .tile:disabled { opacity: 0.4; }
 .tile-icon { font-size: clamp(16px, 5vmin, 38px); line-height: 1; }
+.tile-app-icon { display: block; width: clamp(16px, 6vmin, 36px); height: auto; }
 .tile-icon:empty, .tile-label:empty { display: none; }
 .tile-label { font-size: clamp(10px, 3.1vmin, 17px); font-weight: 650; line-height: 1.2; overflow-wrap: anywhere; }
 

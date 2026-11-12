@@ -17,6 +17,9 @@ internal static class InstallPaths
     public static readonly string ProgramPath = Path.Combine(ProgramDirectory, "PocketDeck.exe");
     public static readonly string Shortcut = Path.Combine(
         Environment.GetFolderPath(Environment.SpecialFolder.Programs), "Pocket Deck.lnk");
+    private static readonly string StartupShortcut = Path.Combine(
+        Environment.GetFolderPath(Environment.SpecialFolder.Startup, Environment.SpecialFolderOption.DoNotVerify),
+        "Pocket Deck.lnk");
     public static readonly string Updates = Path.Combine(Data, "Updates");
     public static readonly string RepositoryFile = Path.Combine(Data, "update-repository.txt");
 
@@ -62,7 +65,7 @@ internal static class InstallPaths
     {
         WithAppClosed(() => {
             InstallFiles(ProgramPath, Data);
-            CreateShortcut();
+            CreateShortcut(Shortcut);
             using (RegistryKey entry = Registry.CurrentUser.CreateSubKey(UninstallKey))
             {
                 entry.SetValue("DisplayName", "Pocket Deck");
@@ -89,12 +92,20 @@ internal static class InstallPaths
         using (var payload = Resource("PocketDeck.Payload")) WriteAtomic(program, payload);
     }
 
-    private static void CreateShortcut()
+    public static bool StartsWithWindows { get { return File.Exists(StartupShortcut); } }
+
+    public static void SetStartsWithWindows(bool enabled)
     {
-        Directory.CreateDirectory(Path.GetDirectoryName(Shortcut));
+        if (enabled) CreateShortcut(StartupShortcut);
+        else File.Delete(StartupShortcut);
+    }
+
+    private static void CreateShortcut(string path)
+    {
+        Directory.CreateDirectory(Path.GetDirectoryName(path));
         Type shellType = Type.GetTypeFromProgID("WScript.Shell", true);
         dynamic shell = Activator.CreateInstance(shellType);
-        dynamic shortcut = shell.CreateShortcut(Shortcut);
+        dynamic shortcut = shell.CreateShortcut(path);
         shortcut.TargetPath = ProgramPath;
         shortcut.WorkingDirectory = ProgramDirectory;
         shortcut.Save();
@@ -103,6 +114,7 @@ internal static class InstallPaths
     public static void Uninstall()
     {
         WithAppClosed(() => {
+            SetStartsWithWindows(false);
             File.Delete(ProgramPath);
             File.Delete(Shortcut);
             Registry.CurrentUser.DeleteSubKeyTree(UninstallKey, false);
