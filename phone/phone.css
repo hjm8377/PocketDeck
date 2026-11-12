@@ -12,9 +12,11 @@
 
 * { box-sizing: border-box; }
 [hidden] { display: none !important; }
+html, body { overflow: hidden; overscroll-behavior: none; }
 
 body {
-  min-height: 100dvh;
+  height: 100vh;
+  height: 100dvh;
   margin: 0;
   padding: max(10px, env(safe-area-inset-top)) max(12px, env(safe-area-inset-right))
     max(12px, env(safe-area-inset-bottom)) max(12px, env(safe-area-inset-left));
@@ -35,16 +37,29 @@ h1 { margin: 0; font-size: 16px; letter-spacing: -0.03em; }
 #status[data-state="ready"] { color: #a3dcc1; }
 #status[data-state="error"] { color: #ffb5b2; }
 
-main { flex: 1; display: grid; }
+main {
+  flex: 1;
+  min-height: 0;
+  min-width: 0;
+  display: grid;
+  grid-template: minmax(0, 1fr) / minmax(0, 1fr);
+}
 
 #deck {
   display: grid;
   grid-template-columns: repeat(var(--columns, 3), minmax(0, 1fr));
-  grid-template-rows: repeat(var(--rows, 2), minmax(56px, 1fr));
+  grid-template-rows: repeat(var(--rows, 2), minmax(0, 1fr));
   gap: var(--gap);
+  -webkit-touch-callout: none;
 }
 
-button, input { font: inherit; }
+button, input, select { font: inherit; }
+
+#deck, #deck * {
+  -webkit-user-select: none;
+  user-select: none;
+  -webkit-user-drag: none;
+}
 
 .tile {
   display: flex;
@@ -63,12 +78,28 @@ button, input { font: inherit; }
   overflow: hidden;
 }
 
-.tile:active { filter: brightness(1.18); }
+button.tile:active, button.tile.is-pressed { filter: brightness(0.68); }
 .tile:disabled { opacity: 0.4; }
 .tile-icon { font-size: clamp(16px, 5vmin, 38px); line-height: 1; }
 .tile-app-icon { display: block; width: clamp(16px, 6vmin, 36px); height: auto; }
 .tile-icon:empty, .tile-label:empty { display: none; }
 .tile-label { font-size: clamp(10px, 3.1vmin, 17px); font-weight: 650; line-height: 1.2; overflow-wrap: anywhere; }
+.widget { text-align: center; gap: 3px; }
+.widget-value { font-size: clamp(15px, 5.2vmin, 40px); font-weight: 700; font-variant-numeric: tabular-nums; }
+.widget-source { color: inherit; font-size: 10px; }
+.mixer { padding: 3px; }
+.mixer select, .mixer-control { width: min(100%, 300px); min-width: 0; }
+.mixer select {
+  padding: 2px;
+  border: 1px solid #ffffff45;
+  border-radius: 5px;
+  background: #222a3b;
+  color: white;
+  font-size: clamp(9px, 2.8vmin, 15px);
+}
+.mixer-control { display: flex; align-items: center; gap: 3px; }
+.mixer input { flex: 1; min-width: 0; margin: 0; accent-color: #adc2ff; }
+.mixer output { font-size: clamp(8px, 2.5vmin, 14px); font-variant-numeric: tabular-nums; }
 
 #pair {
   place-self: center;
@@ -87,6 +118,9 @@ button, input { font: inherit; }
 #pair input { min-width: 0; border: 1px solid #465572; background: var(--surface); letter-spacing: 0.13em; }
 #pair button { border: 0; background: var(--accent); color: white; font-weight: 700; }
 
-@media (orientation: portrait) {
-  #deck { grid-template-rows: repeat(var(--rows, 2), minmax(56px, clamp(80px, 24vw, 150px))); }
+@media (max-height: 310px) {
+  .widget { padding: 2px; gap: 1px; }
+  .widget-source { font-size: 9px; }
+  #pair { gap: 5px; padding: 8px 12px; }
+  #pair input, #pair button { min-height: 34px; padding: 4px 8px; }
 }

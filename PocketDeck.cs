@@ -22,6 +22,38 @@ public sealed class DeckButton
     public string color { get; set; }
     public string action { get; set; }
     public string target { get; set; }
+    public int width { get; set; }
+    public int height { get; set; }
+}
+
+internal static class DeckGrid
+{
+    public static int Width(DeckButton button) { return DeckActions.IsWidget(button) ? Math.Max(1, button.width) : 1; }
+    public static int Height(DeckButton button) { return DeckActions.IsWidget(button) ? Math.Max(1, button.height) : 1; }
+
+    public static int[] Coverage(DeckLayout deck)
+    {
+        int count = deck.columns * deck.rows;
+        var cells = new int[count];
+        for (int i = 0; i < count; i++) cells[i] = i;
+        for (int i = 0; i < deck.buttons.Count; i++)
+        {
+            DeckButton button = deck.buttons[i];
+            if (!DeckActions.IsWidget(button)) continue;
+            int column = i % deck.columns, row = i / deck.columns;
+            int width = Width(button), height = Height(button);
+            if (width > deck.columns - column || height > deck.rows - row) return null;
+            for (int y = row; y < row + height; y++)
+            for (int x = column; x < column + width; x++)
+            {
+                int cell = y * deck.columns + x;
+                if (cell == i) continue;
+                if (cells[cell] != cell || deck.buttons[cell].action != "none") return null;
+                cells[cell] = i;
+            }
+        }
+        return cells;
+    }
 }
 
 public sealed class DeckLayout
@@ -72,7 +104,7 @@ internal sealed class DeckStore
     {
         if (deck == null || deck.columns < 1 || deck.columns > 5 || deck.rows < 1 || deck.rows > 4 ||
             deck.buttons == null || deck.buttons.Count < deck.columns * deck.rows ||
-            deck.buttons.Count > 20 || deck.buttons.Contains(null))
+            deck.buttons.Count > 20 || deck.buttons.Contains(null) || DeckGrid.Coverage(deck) == null)
             throw new InvalidDataException("저장된 버튼 배치를 읽을 수 없습니다.");
     }
 }
@@ -81,14 +113,15 @@ internal static class DeckActions
 {
     public static readonly string[] Names = {
         "동작 없음", "재생 / 일시정지", "이전 곡", "다음 곡", "볼륨 내리기",
-        "볼륨 올리기", "음소거", "프로그램 열기", "키보드 단축키"
+        "볼륨 올리기", "음소거", "프로그램 열기", "키보드 단축키", "시계", "날씨", "볼륨 믹서"
     };
     public static readonly string[] Ids = {
-        "none", "play", "previous", "next", "volumeDown", "volumeUp", "mute", "open", "shortcut"
+        "none", "play", "previous", "next", "volumeDown", "volumeUp", "mute", "open", "shortcut", "clock", "weather", "mixer"
     };
-    private static readonly string[] Icons = { "", "⏯", "⏮", "⏭", "−", "+", "♪", "", "⌨" };
+    private static readonly string[] Icons = { "", "⏯", "⏮", "⏭", "−", "+", "♪", "", "⌨", "◷", "☀", "" };
     private static readonly string[] Colors = {
-        "#39455D", "#365CE8", "#39455D", "#39455D", "#275D59", "#275D59", "#744669", "#28547D", "#684997"
+        "#39455D", "#365CE8", "#39455D", "#39455D", "#275D59", "#275D59", "#744669", "#28547D", "#684997",
+        "#263867", "#215362", "#42376E"
     };
     private static readonly Keys[] Media = {
         Keys.MediaPlayPause, Keys.MediaPreviousTrack, Keys.MediaNextTrack,
@@ -109,6 +142,11 @@ internal static class DeckActions
     public static bool UsesProgramIcon(DeckButton button)
     {
         return button.action == "open" && (String.IsNullOrWhiteSpace(button.icon) || button.icon == "↗");
+    }
+
+    public static bool IsWidget(DeckButton button)
+    {
+        return button.action == "clock" || button.action == "weather" || button.action == "mixer";
     }
 
     public static Bitmap ReadProgramIcon(string path)
@@ -399,16 +437,26 @@ internal sealed class PhoneServer : IDisposable
         if (method == "GET" && route == "/api/layout")
         {
             DeckLayout deck = store.Read();
+            int[] cells = DeckGrid.Coverage(deck);
             var buttons = new List<object>();
             for (int i = 0; i < deck.columns * deck.rows; i++)
             {
                 DeckButton button = deck.buttons[i];
+                bool widget = DeckActions.IsWidget(button);
                 buttons.Add(new { label = button.label, icon = button.icon, color = button.color,
-                    enabled = button.action != "none", appIcon = DeckActions.UsesProgramIcon(button) });
+                    enabled = button.action != "none" && !widget, appIcon = DeckActions.UsesProgramIcon(button),
+                    covered = cells[i] != i, width = DeckGrid.Width(button), height = DeckGrid.Height(button),
+                    widget = widget ? button.action : null, location = button.action == "weather" ? button.target : null });
             }
             Reply(stream, "200 OK", "application/json", new JavaScriptSerializer().Serialize(
                 new { version = deck.version, columns = deck.columns, rows = deck.rows, buttons = buttons }));
             ObserveLayoutRequest(((IPEndPoint)client.Client.RemoteEndPoint).Address, local.Address);
+            return;
+        }
+        if ((method == "GET" && route == "/api/mixer") ||
+            (method == "POST" && route.StartsWith("/api/mixer/", StringComparison.Ordinal)))
+        {
+            ServeMixer(stream, method, route);
             return;
         }
         const string iconRoute = "/api/icon/";
@@ -450,7 +498,7 @@ internal sealed class PhoneServer : IDisposable
                     Reply(stream, "404 Not Found", "text/plain", "Not found");
                     return;
                 }
-                if (deck.buttons[index].action == "none")
+                if (deck.buttons[index].action == "none" || DeckActions.IsWidget(deck.buttons[index]))
                 {
                     Reply(stream, "422 Unprocessable Content", "text/plain", "이 버튼에는 실행 동작이 없어요.");
                     return;
@@ -466,6 +514,45 @@ internal sealed class PhoneServer : IDisposable
             }
         }
         Reply(stream, "404 Not Found", "text/plain", "Not found");
+    }
+
+    private void ServeMixer(NetworkStream stream, string method, string route)
+    {
+        DeckLayout deck = store.Read();
+        int first = deck.buttons.FindIndex(button => button.action == "mixer");
+        if (first < 0 || first >= deck.columns * deck.rows)
+        {
+            Reply(stream, "404 Not Found", "text/plain", "볼륨 믹서 위젯을 적용해 주세요.");
+            return;
+        }
+        try
+        {
+            if (method == "GET")
+            {
+                List<MixerChannel> channels;
+                lock (actionLock) channels = AudioMixer.Read();
+                Reply(stream, "200 OK", "application/json", new JavaScriptSerializer().Serialize(channels));
+                return;
+            }
+            string[] parts = route.Substring("/api/mixer/".Length).Split('/');
+            int volume;
+            if (parts.Length != 2 || parts[0].Length == 0 || parts[0].Length > 512 ||
+                !Int32.TryParse(parts[1], out volume) || volume < 0 || volume > 100)
+            {
+                Reply(stream, "400 Bad Request", "text/plain", "볼륨은 0부터 100까지 설정할 수 있어요.");
+                return;
+            }
+            lock (actionLock) AudioMixer.SetVolume(Uri.UnescapeDataString(parts[0]), volume);
+            Reply(stream, "204 No Content", "text/plain", "");
+        }
+        catch (InvalidOperationException error)
+        {
+            Reply(stream, "422 Unprocessable Content", "text/plain", error.Message);
+        }
+        catch (COMException)
+        {
+            Reply(stream, "503 Service Unavailable", "text/plain", "Windows 오디오 출력 장치를 확인해 주세요.");
+        }
     }
 
     private void ObserveLayoutRequest(IPAddress client, IPAddress host)
@@ -688,6 +775,10 @@ internal sealed class DeckEditor : Form
     private readonly TableLayoutPanel preview = new TableLayoutPanel();
     private readonly NumericUpDown columns = new NumericUpDown();
     private readonly NumericUpDown rows = new NumericUpDown();
+    private readonly NumericUpDown widgetWidth = new NumericUpDown { Minimum = 1, Width = 39 };
+    private readonly NumericUpDown widgetHeight = new NumericUpDown { Minimum = 1, Width = 39 };
+    private readonly Label widgetSizeLabel = new Label { Text = "가로 × 세로 (칸)" };
+    private readonly FlowLayoutPanel widgetSize = new FlowLayoutPanel { WrapContents = false };
     private readonly TextBox name = new TextBox();
     private readonly TextBox icon = new TextBox();
     private readonly Label iconLabel = new Label();
@@ -801,13 +892,19 @@ internal sealed class DeckEditor : Form
         AddField(fields, new Label { Text = "배경색" }, color, 2, 1);
         action.DropDownStyle = ComboBoxStyle.DropDownList;
         action.Items.AddRange(DeckActions.Names);
-        AddField(fields, new Label { Text = "실행 동작" }, action, 0, 3);
+        AddField(fields, new Label { Text = "동작 / 위젯" }, action, 0, 3);
         AddField(fields, targetLabel, target, 1, 3);
         browse.Text = "프로그램 선택…";
         browse.Height = 28;
         browse.Click += BrowseProgram;
         fields.Controls.Add(browse, 2, 4);
         browse.Dock = DockStyle.Top;
+        widgetWidth.AccessibleName = "위젯 가로 칸 수";
+        widgetHeight.AccessibleName = "위젯 세로 칸 수";
+        widgetWidth.Margin = widgetHeight.Margin = Padding.Empty;
+        widgetSize.Controls.AddRange(new Control[] { widgetWidth,
+            new Label { Text = "×", AutoSize = true, Margin = new Padding(3, 3, 3, 0) }, widgetHeight });
+        AddField(fields, widgetSizeLabel, widgetSize, 2, 3);
         root.Controls.Add(CreateActionPanel(), 1, 0);
 
         var footer = new FlowLayoutPanel { Dock = DockStyle.Fill, WrapContents = false,
@@ -839,6 +936,8 @@ internal sealed class DeckEditor : Form
         };
         columns.ValueChanged += (s, e) => ResizeGrid();
         rows.ValueChanged += (s, e) => ResizeGrid();
+        widgetWidth.ValueChanged += (s, e) => ResizeWidget();
+        widgetHeight.ValueChanged += (s, e) => ResizeWidget();
         FormClosing += (s, e) => {
             if (dirty && MessageBox.Show(this, "적용하지 않은 변경이 있어요. 닫을까요?", Text,
                 MessageBoxButtons.YesNo, MessageBoxIcon.Question) != DialogResult.Yes) e.Cancel = true;
@@ -864,6 +963,10 @@ internal sealed class DeckEditor : Form
         AddAction(system, 8);
         var media = actions.Nodes.Add("미디어");
         for (int i = 1; i <= 6; i++) AddAction(media, i);
+        var widgets = actions.Nodes.Add("위젯");
+        AddAction(widgets, 9);
+        AddAction(widgets, 10);
+        AddAction(widgets, 11);
         actions.ExpandAll();
         actions.ItemDrag += (s, e) => {
             var node = (TreeNode)e.Item;
@@ -1055,12 +1158,49 @@ internal sealed class DeckEditor : Form
 
     private void ResizeGrid()
     {
+        if (loading) return;
+        int oldColumns = draft.columns, oldRows = draft.rows;
         draft.columns = (int)columns.Value;
         draft.rows = (int)rows.Value;
         int total = draft.columns * draft.rows;
         while (draft.buttons.Count < total)
             draft.buttons.Add(DeckActions.DefaultButton(0));
-        selected = Math.Min(selected, total - 1);
+        int[] coverage = DeckGrid.Coverage(draft);
+        if (coverage == null)
+        {
+            draft.columns = oldColumns;
+            draft.rows = oldRows;
+            loading = true;
+            columns.Value = oldColumns;
+            rows.Value = oldRows;
+            loading = false;
+            status.Text = "위젯이 격자 밖으로 나가거나 다른 타일과 겹쳐요.";
+            return;
+        }
+        selected = coverage[Math.Min(selected, total - 1)];
+        Rebuild();
+        SelectTile(selected);
+        MarkDirty();
+    }
+
+    private void ResizeWidget()
+    {
+        if (loading) return;
+        DeckButton button = draft.buttons[selected];
+        int oldWidth = DeckGrid.Width(button), oldHeight = DeckGrid.Height(button);
+        button.width = (int)widgetWidth.Value;
+        button.height = (int)widgetHeight.Value;
+        if (DeckGrid.Coverage(draft) == null)
+        {
+            button.width = oldWidth;
+            button.height = oldHeight;
+            loading = true;
+            widgetWidth.Value = oldWidth;
+            widgetHeight.Value = oldHeight;
+            loading = false;
+            status.Text = "위젯을 늘리려면 오른쪽과 아래쪽에 빈 칸이 필요해요.";
+            return;
+        }
         Rebuild();
         SelectTile(selected);
         MarkDirty();
@@ -1069,7 +1209,8 @@ internal sealed class DeckEditor : Form
     private void Rebuild()
     {
         preview.SuspendLayout();
-        foreach (Button tile in tiles) tile.Dispose();
+        foreach (Button tile in tiles)
+            if (tile != null) tile.Dispose();
         tiles.Clear();
         preview.ColumnStyles.Clear();
         preview.RowStyles.Clear();
@@ -1079,8 +1220,10 @@ internal sealed class DeckEditor : Form
             preview.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100F / draft.columns));
         for (int i = 0; i < draft.rows; i++)
             preview.RowStyles.Add(new RowStyle(SizeType.Percent, 100F / draft.rows));
-        for (int i = 0; i < draft.columns * draft.rows; i++)
+        int[] coverage = DeckGrid.Coverage(draft);
+        for (int i = 0; i < coverage.Length; i++)
         {
+            if (coverage[i] != i) { tiles.Add(null); continue; }
             int index = i;
             var tile = new Button { Dock = DockStyle.Fill, Margin = new Padding(5), FlatStyle = FlatStyle.Flat,
                 AllowDrop = true, UseMnemonic = false, Cursor = Cursors.Hand,
@@ -1109,23 +1252,45 @@ internal sealed class DeckEditor : Form
                 int pickedAction = ActionFromDrop(e.Data);
                 if (pickedAction > 0)
                 {
-                    AssignAction(index, pickedAction);
+                    BeginInvoke((Action)(() => AssignAction(index, pickedAction)));
                     return;
                 }
                 object data = e.Data.GetData(typeof(int));
                 if (!(data is int)) return;
                 int from = (int)data;
                 if (from == index || from < 0 || from >= tiles.Count) return;
-                DeckButton moved = draft.buttons[from];
-                draft.buttons[from] = draft.buttons[index];
-                draft.buttons[index] = moved;
-                SelectTile(index);
-                MarkDirty();
+                BeginInvoke((Action)(() => MoveTile(from, index)));
             };
             tiles.Add(tile);
             preview.Controls.Add(tile, i % draft.columns, i / draft.columns);
+            preview.SetColumnSpan(tile, DeckGrid.Width(draft.buttons[i]));
+            preview.SetRowSpan(tile, DeckGrid.Height(draft.buttons[i]));
         }
         preview.ResumeLayout();
+    }
+
+    private void Swap(int first, int second)
+    {
+        DeckButton button = draft.buttons[first];
+        draft.buttons[first] = draft.buttons[second];
+        draft.buttons[second] = button;
+    }
+
+    private bool CanMoveTile(int from, int to)
+    {
+        Swap(from, to);
+        bool fits = DeckGrid.Coverage(draft) != null;
+        Swap(from, to);
+        return fits;
+    }
+
+    private void MoveTile(int from, int to)
+    {
+        if (!CanMoveTile(from, to)) return;
+        Swap(from, to);
+        Rebuild();
+        SelectTile(to);
+        MarkDirty();
     }
 
     private void DragTile(Button tile, int index)
@@ -1156,9 +1321,10 @@ internal sealed class DeckEditor : Form
     private void UpdateDropTarget(DragEventArgs args, int index)
     {
         if (ActionFromDrop(args.Data) > 0) args.Effect = DragDropEffects.Copy;
-        else if (dragSource >= 0 && args.Data.GetDataPresent(typeof(int))) args.Effect = DragDropEffects.Move;
+        else if (dragSource >= 0 && args.Data.GetDataPresent(typeof(int)))
+            args.Effect = index != dragSource && CanMoveTile(dragSource, index) ? DragDropEffects.Move : DragDropEffects.None;
         else return;
-        HighlightDropTarget(index == dragSource ? -1 : index);
+        HighlightDropTarget(args.Effect == DragDropEffects.None ? -1 : index);
     }
 
     private static int ActionFromDrop(IDataObject data)
@@ -1186,6 +1352,10 @@ internal sealed class DeckEditor : Form
         color.BackColor = ParseColor(button.color);
         action.SelectedIndex = Math.Max(0, Array.IndexOf(DeckActions.Ids, button.action));
         target.Text = button.target;
+        widgetWidth.Maximum = draft.columns - index % draft.columns;
+        widgetHeight.Maximum = draft.rows - index / draft.columns;
+        widgetWidth.Value = DeckGrid.Width(button);
+        widgetHeight.Value = DeckGrid.Height(button);
         UpdateTarget();
         loading = false;
         for (int i = 0; i < tiles.Count; i++) DrawTile(i);
@@ -1194,10 +1364,14 @@ internal sealed class DeckEditor : Form
     private void UpdateTarget()
     {
         bool opensProgram = action.SelectedIndex == 7;
+        bool weather = action.SelectedIndex == 10;
+        bool widget = action.SelectedIndex >= 9;
         iconLabel.Text = opensProgram ? "아이콘 · 비워두면 프로그램 아이콘" : "아이콘 · 문자 또는 이모지";
-        targetLabel.Text = opensProgram ? "프로그램 경로" : "단축키";
-        targetLabel.Visible = target.Visible = action.SelectedIndex >= 7;
+        targetLabel.Text = opensProgram ? "프로그램 경로" : weather ? "도시 이름" : "단축키";
+        targetLabel.Visible = target.Visible = opensProgram || weather || action.SelectedIndex == 8;
         browse.Visible = opensProgram;
+        widgetSizeLabel.Visible = widgetSize.Visible = widget;
+        iconLabel.Visible = icon.Visible = !widget;
     }
 
     private void AssignAction(int index, int next)
@@ -1206,6 +1380,7 @@ internal sealed class DeckEditor : Form
         if (button.action != DeckActions.Ids[next])
         {
             int previous = Math.Max(0, Array.IndexOf(DeckActions.Ids, button.action));
+            bool wasWidget = DeckActions.IsWidget(button);
             DeckButton oldDefault = DeckActions.DefaultButton(previous);
             DeckButton newDefault = DeckActions.DefaultButton(next);
             if (String.IsNullOrWhiteSpace(button.label) || button.label == oldDefault.label)
@@ -1217,6 +1392,12 @@ internal sealed class DeckEditor : Form
                 button.color = newDefault.color;
             button.action = newDefault.action;
             button.target = "";
+            if (!DeckActions.IsWidget(button))
+            {
+                button.width = 0;
+                button.height = 0;
+            }
+            if (wasWidget) Rebuild();
             MarkDirty();
         }
         SelectTile(index);
@@ -1244,6 +1425,7 @@ internal sealed class DeckEditor : Form
     private void DrawTile(int index)
     {
         Button tile = tiles[index];
+        if (tile == null) return;
         DeckButton button = draft.buttons[index];
         bool programIcon = DeckActions.UsesProgramIcon(button);
         string imagePath = programIcon ? button.target : null;
@@ -1256,6 +1438,8 @@ internal sealed class DeckEditor : Form
         }
         string caption = tile.Image != null ? button.label :
             ((programIcon ? "↗" : button.icon) + "\n" + button.label).Trim();
+        if (DeckActions.IsWidget(button))
+            caption = button.label + "\n" + DeckGrid.Width(button) + " × " + DeckGrid.Height(button);
         tile.Text = String.IsNullOrWhiteSpace(caption) ? "빈 버튼" : caption;
         Color background = ParseColor(button.color);
         if (index == dragSource)
@@ -1284,6 +1468,8 @@ internal sealed class DeckEditor : Form
                 try
                 {
                     if (button.action == "shortcut") DeckActions.ParseShortcut(button.target);
+                    if (button.action == "weather" && (String.IsNullOrWhiteSpace(button.target) || button.target.Length > 80))
+                        throw new InvalidOperationException("날씨를 표시할 도시 이름을 입력해 주세요.");
                     if (button.action == "open" && (!Path.IsPathRooted(button.target) ||
                         !File.Exists(button.target) ||
                         !String.Equals(Path.GetExtension(button.target), ".exe", StringComparison.OrdinalIgnoreCase)))
